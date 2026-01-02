@@ -65,11 +65,15 @@ class MedicalDataset(Dataset):
             anatom_site_general_id = 0
         else:
             anatom_site_general_id = self.anatom_site_general2id[anatom_site_general]
+        if pd.isna(age):
+            age = 0.0
+        else:
+            age = age
         
         value_list = []
         for key in self.label_dict.keys():
             # print(f'key is {key}: {skincon_row[key].item()}')
-            value_list.append(skincon_row[key].item())
+            value_list.append(skincon_row.iloc[0][key])
         total = sum(value_list)
         
         value_tensor = torch.tensor([x / total for x in value_list], dtype=torch.float32)
@@ -79,7 +83,7 @@ class MedicalDataset(Dataset):
         image_path = join(self.img_dir, image_name)
         img = Image.open(image_path).convert('RGB')
         img = self.transform(img)
-
+        
         
         return img, value_tensor, torch.tensor(final_label_id, dtype=torch.int), sex_id, anatom_site_general_id, age
         
