@@ -7,11 +7,11 @@ from tqdm import tqdm
 import os
 import wandb
 
-wandb.init(
-    project="Medical_MoE",
-    name="MoE_Training_Run",
-    mode="offline"
-)
+# wandb.init(
+#     project="Medical_MoE",
+#     name="MoE_Training_Run",
+#     mode="offline"
+# )
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 dtype=torch.float32

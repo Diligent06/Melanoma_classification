@@ -3,3 +3,4 @@ ckpts/
 wandb/
 __pycache__/
 *.log
+temp_output_folder/

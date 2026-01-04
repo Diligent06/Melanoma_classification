@@ -79,12 +79,18 @@ class FinalClassifier(nn.Module):
 class Backbone_MoE(nn.Module):
     def __init__(self, expert_num=4, device=torch.device('cpu'), dtype=torch.float32):
         super().__init__()
-        
+        self.device = device
         self.seg_model = build_mobileunetr_xxs(num_classes=1, image_size=512)
-        self.seg_model.to(device=device, dtype=dtype)
+        
+        ckpt = torch.load('/home/diligent/workspace/Medical/ckpts/final_model_files/isic_2018_pytorch_model.bin', map_location='cpu')
+        self.seg_model.load_state_dict(ckpt)
+        
+        self.seg_model.to(device=device)
         # segmentation model is frozon
-        for param in self.seg_model.parameters():
-            param.requires_grad = False
+        # for param in self.seg_model.parameters():
+        #     param.requires_grad = False
+            
+        # self.seg_model.eval()
     
         self.desnet_model = models.densenet201(
             weights=models.DenseNet201_Weights.IMAGENET1K_V1
@@ -108,6 +114,10 @@ class Backbone_MoE(nn.Module):
         self.fuse_type = 'gate' # 'gate' or 'concat' or 'diff'
         
         self.transform = T.Compose([T.Resize((224, 224))])
+    
+    def seg_model_init(self):
+        ckpt = torch.load('/home/diligent/workspace/Medical/ckpts/final_model_files/isic_2018_pytorch_model.bin', map_location=self.device)
+        self.seg_model.load_state_dict(ckpt)
 
     def _init_weights(self):
         # Embeddings
@@ -137,13 +147,65 @@ class Backbone_MoE(nn.Module):
                     nn.init.constant_(m.bias, 0)
 
     def forward(self, x, context_features):
-        # print('hello world1')
-        seg_mask = self.seg_model.forward(x)
-        seg_mask = seg_mask[0, 0]
-        binary = (seg_mask > 0).float()
-        binary = binary.unsqueeze(0).unsqueeze(0)  # Add batch and channel dimensions
+        seg_mask = self.segment_forward(x) # shape is (B, H, W)
+        binary = (seg_mask > 0).float()    # convert float to binary mask
+        binary = binary.unsqueeze(1)  # Add batch and channel dimensions
         masked_x = x * binary  # Apply segmentation mask
-        # print('hello world2')
+
+        if not self.training:
+            with torch.no_grad():
+                masked_x_features = self.desnet_model.features(self.transform(masked_x))
+                masked_x_features = torch.nn.functional.relu(masked_x_features)
+                masked_pooled = torch.nn.functional.adaptive_avg_pool2d(masked_x_features, (1, 1))
+                masked_pooled = masked_pooled.view(masked_pooled.size(0), -1)  # [batch_size, 1920]
+                
+                x_feature = self.desnet_model.features(self.transform(x))
+                x_feature = torch.nn.functional.relu(x_feature)
+                x_pooled = torch.nn.functional.adaptive_avg_pool2d(x_feature, (1, 1))
+                x_pooled = x_pooled.view(x_pooled.size(0), -1)  # [batch_size, 1920]
+                
+        else:
+            masked_x_features = self.desnet_model.features(self.transform(masked_x))
+            masked_x_features = torch.nn.functional.relu(masked_x_features)
+            masked_pooled = torch.nn.functional.adaptive_avg_pool2d(masked_x_features, (1, 1))
+            masked_pooled = masked_pooled.view(masked_pooled.size(0), -1)  # [batch_size, 1920]
+
+            x_feature = self.desnet_model.features(self.transform(x))
+            x_feature = torch.nn.functional.relu(x_feature)
+            x_pooled = torch.nn.functional.adaptive_avg_pool2d(x_feature, (1, 1))
+            x_pooled = x_pooled.view(x_pooled.size(0), -1)  # [batch_size, 1920]
+
+        fused_x = self.gate_fuse(x_pooled, masked_pooled)
+
+        age = context_features['age'].unsqueeze(1)
+        sex = context_features['sex'].to(dtype=torch.long)
+        anatom_site_general = context_features['anatom_site_general'].to(dtype=torch.long)
+        
+
+        sex_feat = self.sex_emb(sex)
+        anatom_site_general_feat = self.site_emb(anatom_site_general)
+        final_feat = torch.cat([age, sex_feat, anatom_site_general_feat], dim=1) 
+
+        gate_w = self.moe_gate(final_feat)  # (B, num_experts)
+
+        expert_outs = []
+        for expert in self.expert_head:
+            expert_outs.append(expert(fused_x))
+
+        expert_outs = torch.stack(expert_outs, dim=1)  # (B, num_experts, num_classes)
+        out = (expert_outs * gate_w.unsqueeze(-1)).sum(dim=1)  # (B, num_classes)
+
+        return out, self.fc(out), gate_w # out is probability distribution over classes, fc is final classifier output
+    
+    def forward_eval(self, x, context_features):
+        # print('hello world1')
+        seg_mask = self.segment_forward(x)
+        # seg_mask = self.seg_model.forward(x)
+        # seg_mask = seg_mask[:, 0]
+        # from IPython import embed; embed()
+        binary = (seg_mask > 0).float()
+        binary = binary.unsqueeze(1)  # Add channel dimensions
+        masked_x = x * binary  # Apply segmentation mask
         
         if not self.training:
             with torch.no_grad():
@@ -201,9 +263,9 @@ class Backbone_MoE(nn.Module):
         expert_outs = torch.stack(expert_outs, dim=1)  # (B, num_experts, num_classes)
         out = (expert_outs * gate_w.unsqueeze(-1)).sum(dim=1)  # (B, num_classes)
         # print('hello world8')
-        return out, self.fc(out), gate_w # out is probability distribution over classes, fc is final classifier output
+        return out, self.fc(out), seg_mask # out is probability distribution over classes, fc is final classifier output
         
-        
-        
-        
+    def segment_forward(self, x):
+        seg_mask = self.seg_model.forward(x)
+        return seg_mask[:, 0]
         
